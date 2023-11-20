@@ -106,7 +106,9 @@ func (e Event) String() string {
 type (
 	addOpt   func(opt *withOpts)
 	withOpts struct {
-		bufsize int
+		bufsize          int
+		withoutdir       bool
+		preferclosewrite bool
 	}
 )
 
@@ -134,6 +136,18 @@ func getOptions(opts ...addOpt) withOpts {
 // [ReadDirectoryChangesW]: https://learn.microsoft.com/en-gb/windows/win32/api/winbase/nf-winbase-readdirectorychangesw
 func WithBufferSize(bytes int) addOpt {
 	return func(opt *withOpts) { opt.bufsize = bytes }
+}
+
+// WithoutDirectories filters out directory events.
+func WithoutDirectories() addOpt {
+	return func(opt *withOpts) { opt.withoutdir = true }
+}
+
+// PreferCloseWrite will trigger Write event on close write for systems which supports it.
+//
+// Currently supported with inotify (Linux) only
+func PreferCloseWrite() addOpt {
+	return func(opt *withOpts) { opt.preferclosewrite = true }
 }
 
 // Check if this path is recursive (ends with "/..." or "\..."), and return the

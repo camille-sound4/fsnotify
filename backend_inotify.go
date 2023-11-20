@@ -135,12 +135,14 @@ type Watcher struct {
 
 	// Store fd here as os.File.Read() will no longer return on close after
 	// calling Fd(). See: https://github.com/golang/go/issues/26439
-	fd          int
-	inotifyFile *os.File
-	watches     *watches
-	done        chan struct{} // Channel for sending a "quit message" to the reader goroutine
-	closeMu     sync.Mutex
-	doneResp    chan struct{} // Channel to respond to Close
+	fd               int
+	inotifyFile      *os.File
+	watches          *watches
+	done             chan struct{} // Channel for sending a "quit message" to the reader goroutine
+	closeMu          sync.Mutex
+	doneResp         chan struct{} // Channel to respond to Close
+	withoutdir       bool          // do not send events for directory
+	preferclosewrite bool
 }
 
 type (
@@ -273,6 +275,11 @@ func NewBufferedWatcher(sz uint) (*Watcher, error) {
 
 // Returns true if the event was sent, or false if watcher is closed.
 func (w *Watcher) sendEvent(e Event) bool {
+	if w.withoutdir {
+		if fi, err := os.Stat(e.Name); err == nil && fi.IsDir() {
+			return true
+		}
+	}
 	select {
 	case w.Events <- e:
 		return true
@@ -374,12 +381,16 @@ func (w *Watcher) AddWith(name string, opts ...addOpt) error {
 	}
 
 	name = filepath.Clean(name)
-	_ = getOptions(opts...)
+	with := getOptions(opts...)
+	w.withoutdir = with.withoutdir
+	w.preferclosewrite = with.preferclosewrite
 
 	var flags uint32 = unix.IN_MOVED_TO | unix.IN_MOVED_FROM |
 		unix.IN_CREATE | unix.IN_ATTRIB | unix.IN_MODIFY |
 		unix.IN_MOVE_SELF | unix.IN_DELETE | unix.IN_DELETE_SELF
-
+	if w.preferclosewrite {
+		flags = flags | unix.IN_CLOSE_WRITE
+	}
 	return w.watches.updatePath(name, func(existing *watch) (*watch, error) {
 		if existing != nil {
 			flags |= existing.flags | unix.IN_MASK_ADD
@@ -575,14 +586,23 @@ func (w *Watcher) readEvents() {
 // newEvent returns an platform-independent Event based on an inotify mask.
 func (w *Watcher) newEvent(name string, mask uint32) Event {
 	e := Event{Name: name}
-	if mask&unix.IN_CREATE == unix.IN_CREATE || mask&unix.IN_MOVED_TO == unix.IN_MOVED_TO {
-		e.Op |= Create
-	}
 	if mask&unix.IN_DELETE_SELF == unix.IN_DELETE_SELF || mask&unix.IN_DELETE == unix.IN_DELETE {
 		e.Op |= Remove
 	}
-	if mask&unix.IN_MODIFY == unix.IN_MODIFY {
-		e.Op |= Write
+	if !w.preferclosewrite {
+		if mask&unix.IN_CREATE == unix.IN_CREATE || mask&unix.IN_MOVED_TO == unix.IN_MOVED_TO {
+			e.Op |= Create
+		}
+		if mask&unix.IN_MODIFY == unix.IN_MODIFY {
+			e.Op |= Write
+		}
+	} else {
+		if mask&unix.IN_CREATE == unix.IN_CREATE {
+			e.Op |= Create
+		}
+		if mask&unix.IN_CLOSE_WRITE == unix.IN_CLOSE_WRITE || mask&unix.IN_MOVED_TO == unix.IN_MOVED_TO {
+			e.Op |= Write
+		}
 	}
 	if mask&unix.IN_MOVE_SELF == unix.IN_MOVE_SELF || mask&unix.IN_MOVED_FROM == unix.IN_MOVED_FROM {
 		e.Op |= Rename

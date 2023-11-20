@@ -141,6 +141,7 @@ type Watcher struct {
 	paths        map[int]pathInfo            // File descriptors to path names for processing kqueue events.
 	fileExists   map[string]struct{}         // Keep track of if we know this file exists (to stop duplicate create events).
 	isClosed     bool                        // Set to true when Close() is first called
+	withoutdir   bool                        // do not send events for directory
 }
 
 type pathInfo struct {
@@ -222,6 +223,11 @@ func newKqueue() (kq int, closepipe [2]int, err error) {
 
 // Returns true if the event was sent, or false if watcher is closed.
 func (w *Watcher) sendEvent(e Event) bool {
+	if w.withoutdir {
+		if fi, err := os.Stat(e.Name); err == nil && fi.IsDir() {
+			return true
+		}
+	}
 	select {
 	case w.Events <- e:
 		return true
@@ -312,7 +318,8 @@ func (w *Watcher) Add(name string) error { return w.AddWith(name) }
 //   - [WithBufferSize] sets the buffer size for the Windows backend; no-op on
 //     other platforms. The default is 64K (65536 bytes).
 func (w *Watcher) AddWith(name string, opts ...addOpt) error {
-	_ = getOptions(opts...)
+	with := getOptions(opts...)
+	w.withoutdir = with.withoutdir
 
 	w.mu.Lock()
 	w.userWatches[name] = struct{}{}

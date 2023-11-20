@@ -130,11 +130,12 @@ type Watcher struct {
 	//  - kqueue, fen:  Not used.
 	Errors chan error
 
-	mu      sync.Mutex
-	port    *unix.EventPort
-	done    chan struct{}       // Channel for sending a "quit message" to the reader goroutine
-	dirs    map[string]struct{} // Explicitly watched directories
-	watches map[string]struct{} // Explicitly watched non-directories
+	mu         sync.Mutex
+	port       *unix.EventPort
+	done       chan struct{}       // Channel for sending a "quit message" to the reader goroutine
+	dirs       map[string]struct{} // Explicitly watched directories
+	watches    map[string]struct{} // Explicitly watched non-directories
+	withoutdir bool                // do not send events for directory
 }
 
 // NewWatcher creates a new Watcher.
@@ -172,6 +173,11 @@ func NewBufferedWatcher(sz uint) (*Watcher, error) {
 // sendEvent attempts to send an event to the user, returning true if the event
 // was put in the channel successfully and false if the watcher has been closed.
 func (w *Watcher) sendEvent(name string, op Op) (sent bool) {
+	if w.withoutdir {
+		if fi, err := os.Stat(name); err == nil && fi.IsDir() {
+			return true
+		}
+	}
 	select {
 	case w.Events <- Event{Name: name, Op: op}:
 		return true
@@ -266,7 +272,8 @@ func (w *Watcher) AddWith(name string, opts ...addOpt) error {
 		return nil
 	}
 
-	_ = getOptions(opts...)
+	with := getOptions(opts...)
+	w.withoutdir = with.withoutdir
 
 	// Currently we resolve symlinks that were explicitly requested to be
 	// watched. Otherwise we would use LStat here.

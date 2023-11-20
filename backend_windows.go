@@ -142,9 +142,10 @@ type Watcher struct {
 	input chan *input    // Inputs to the reader are sent on this channel
 	quit  chan chan<- error
 
-	mu      sync.Mutex // Protects access to watches, closed
-	watches watchMap   // Map of watches (key: i-number)
-	closed  bool       // Set to true when Close() is first called
+	mu         sync.Mutex // Protects access to watches, closed
+	watches    watchMap   // Map of watches (key: i-number)
+	closed     bool       // Set to true when Close() is first called
+	withoutdir bool       // do not send events for directory
 }
 
 // NewWatcher creates a new Watcher.
@@ -186,6 +187,11 @@ func (w *Watcher) isClosed() bool {
 func (w *Watcher) sendEvent(name string, mask uint64) bool {
 	if mask == 0 {
 		return false
+	}
+	if w.withoutdir {
+		if fi, err := os.Stat(name); err == nil && fi.IsDir() {
+			return true
+		}
 	}
 
 	event := w.newEvent(name, uint32(mask))
@@ -280,6 +286,7 @@ func (w *Watcher) AddWith(name string, opts ...addOpt) error {
 	if with.bufsize < 4096 {
 		return fmt.Errorf("fsnotify.WithBufferSize: buffer size cannot be smaller than 4096 bytes")
 	}
+	w.withoutdir = with.withoutdir
 
 	in := &input{
 		op:      opAddWatch,
