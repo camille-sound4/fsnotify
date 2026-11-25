@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"golang.org/x/sys/unix"
 )
@@ -135,7 +136,7 @@ type Watcher struct {
 	done       chan struct{}       // Channel for sending a "quit message" to the reader goroutine
 	dirs       map[string]struct{} // Explicitly watched directories
 	watches    map[string]struct{} // Explicitly watched non-directories
-	withoutdir bool                // do not send events for directory
+	withoutdir atomic.Bool         // do not send events for directory (set by AddWith, read by the reader)
 }
 
 // NewWatcher creates a new Watcher.
@@ -173,7 +174,7 @@ func NewBufferedWatcher(sz uint) (*Watcher, error) {
 // sendEvent attempts to send an event to the user, returning true if the event
 // was put in the channel successfully and false if the watcher has been closed.
 func (w *Watcher) sendEvent(name string, op Op) (sent bool) {
-	if w.withoutdir {
+	if w.withoutdir.Load() {
 		if fi, err := os.Stat(name); err == nil && fi.IsDir() {
 			return true
 		}
@@ -273,7 +274,7 @@ func (w *Watcher) AddWith(name string, opts ...addOpt) error {
 	}
 
 	with := getOptions(opts...)
-	w.withoutdir = with.withoutdir
+	w.withoutdir.Store(with.withoutdir)
 
 	// Currently we resolve symlinks that were explicitly requested to be
 	// watched. Otherwise we would use LStat here.

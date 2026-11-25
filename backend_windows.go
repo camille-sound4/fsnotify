@@ -19,6 +19,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -142,10 +143,10 @@ type Watcher struct {
 	input chan *input    // Inputs to the reader are sent on this channel
 	quit  chan chan<- error
 
-	mu         sync.Mutex // Protects access to watches, closed
-	watches    watchMap   // Map of watches (key: i-number)
-	closed     bool       // Set to true when Close() is first called
-	withoutdir bool       // do not send events for directory
+	mu         sync.Mutex  // Protects access to watches, closed
+	watches    watchMap    // Map of watches (key: i-number)
+	closed     bool        // Set to true when Close() is first called
+	withoutdir atomic.Bool // do not send events for directory (set by AddWith, read by the reader)
 }
 
 // NewWatcher creates a new Watcher.
@@ -188,7 +189,7 @@ func (w *Watcher) sendEvent(name string, mask uint64) bool {
 	if mask == 0 {
 		return false
 	}
-	if w.withoutdir {
+	if w.withoutdir.Load() {
 		if fi, err := os.Stat(name); err == nil && fi.IsDir() {
 			return true
 		}
@@ -286,7 +287,7 @@ func (w *Watcher) AddWith(name string, opts ...addOpt) error {
 	if with.bufsize < 4096 {
 		return fmt.Errorf("fsnotify.WithBufferSize: buffer size cannot be smaller than 4096 bytes")
 	}
-	w.withoutdir = with.withoutdir
+	w.withoutdir.Store(with.withoutdir)
 
 	in := &input{
 		op:      opAddWatch,

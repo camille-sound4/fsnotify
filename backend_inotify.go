@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -141,8 +142,8 @@ type Watcher struct {
 	done             chan struct{} // Channel for sending a "quit message" to the reader goroutine
 	closeMu          sync.Mutex
 	doneResp         chan struct{} // Channel to respond to Close
-	withoutdir       bool          // do not send events for directory
-	preferclosewrite bool
+	withoutdir       atomic.Bool   // do not send events for directory (set by AddWith, read by the reader)
+	preferclosewrite atomic.Bool   // set by AddWith, read by the reader
 }
 
 type (
@@ -275,7 +276,7 @@ func NewBufferedWatcher(sz uint) (*Watcher, error) {
 
 // Returns true if the event was sent, or false if watcher is closed.
 func (w *Watcher) sendEvent(e Event) bool {
-	if w.withoutdir {
+	if w.withoutdir.Load() {
 		if fi, err := os.Stat(e.Name); err == nil && fi.IsDir() {
 			return true
 		}
@@ -382,13 +383,13 @@ func (w *Watcher) AddWith(name string, opts ...addOpt) error {
 
 	name = filepath.Clean(name)
 	with := getOptions(opts...)
-	w.withoutdir = with.withoutdir
-	w.preferclosewrite = with.preferclosewrite
+	w.withoutdir.Store(with.withoutdir)
+	w.preferclosewrite.Store(with.preferclosewrite)
 
 	var flags uint32 = unix.IN_MOVED_TO | unix.IN_MOVED_FROM |
 		unix.IN_CREATE | unix.IN_ATTRIB | unix.IN_MODIFY |
 		unix.IN_MOVE_SELF | unix.IN_DELETE | unix.IN_DELETE_SELF
-	if w.preferclosewrite {
+	if w.preferclosewrite.Load() {
 		flags = flags | unix.IN_CLOSE_WRITE
 	}
 	return w.watches.updatePath(name, func(existing *watch) (*watch, error) {
@@ -589,7 +590,7 @@ func (w *Watcher) newEvent(name string, mask uint32) Event {
 	if mask&unix.IN_DELETE_SELF == unix.IN_DELETE_SELF || mask&unix.IN_DELETE == unix.IN_DELETE {
 		e.Op |= Remove
 	}
-	if !w.preferclosewrite {
+	if !w.preferclosewrite.Load() {
 		if mask&unix.IN_CREATE == unix.IN_CREATE || mask&unix.IN_MOVED_TO == unix.IN_MOVED_TO {
 			e.Op |= Create
 		}

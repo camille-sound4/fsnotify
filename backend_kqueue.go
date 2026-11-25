@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"golang.org/x/sys/unix"
 )
@@ -141,7 +142,7 @@ type Watcher struct {
 	paths        map[int]pathInfo            // File descriptors to path names for processing kqueue events.
 	fileExists   map[string]struct{}         // Keep track of if we know this file exists (to stop duplicate create events).
 	isClosed     bool                        // Set to true when Close() is first called
-	withoutdir   bool                        // do not send events for directory
+	withoutdir   atomic.Bool                 // do not send events for directory (set by AddWith, read by the reader)
 }
 
 type pathInfo struct {
@@ -223,7 +224,7 @@ func newKqueue() (kq int, closepipe [2]int, err error) {
 
 // Returns true if the event was sent, or false if watcher is closed.
 func (w *Watcher) sendEvent(e Event) bool {
-	if w.withoutdir {
+	if w.withoutdir.Load() {
 		if fi, err := os.Stat(e.Name); err == nil && fi.IsDir() {
 			return true
 		}
@@ -319,7 +320,7 @@ func (w *Watcher) Add(name string) error { return w.AddWith(name) }
 //     other platforms. The default is 64K (65536 bytes).
 func (w *Watcher) AddWith(name string, opts ...addOpt) error {
 	with := getOptions(opts...)
-	w.withoutdir = with.withoutdir
+	w.withoutdir.Store(with.withoutdir)
 
 	w.mu.Lock()
 	w.userWatches[name] = struct{}{}
