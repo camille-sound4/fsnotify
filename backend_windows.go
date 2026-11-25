@@ -694,6 +694,7 @@ func (w *Watcher) readEvents() {
 			continue
 		}
 
+		lost := false // some events did not fit in the buffer
 		switch qErr {
 		case nil:
 			// No error
@@ -701,11 +702,23 @@ func (w *Watcher) readEvents() {
 			if watch == nil {
 				w.sendError(errors.New("ERROR_MORE_DATA has unexpectedly null lpOverlapped buffer"))
 			} else {
-				// The i/o succeeded but the buffer is full.
-				// In theory we should be building up a full packet.
-				// In practice we can get away with just carrying on.
-				n = uint32(unsafe.Sizeof(watch.buf))
+				// The i/o succeeded but the buffer is full: parse what was
+				// written, then report the lost events.
+				// (buf is a slice: unsafe.Sizeof(watch.buf) is the size of the
+				// slice header, not of the buffer.)
+				if n > uint32(len(watch.buf)) {
+					n = uint32(len(watch.buf))
+				}
+				lost = true
 			}
+		case windows.ERROR_NOTIFY_ENUM_DIR:
+			// Too many changes to report them: this is how a buffer overflow is
+			// reported for a network share. Keep watching.
+			w.sendError(ErrEventOverflow)
+			if err := w.startRead(watch); err != nil {
+				w.sendError(err)
+			}
+			continue
 		case windows.ERROR_ACCESS_DENIED:
 			// Watched directory was probably removed
 			w.sendEvent(watch.path, watch.mask&sysFSDELETESELF)
@@ -717,13 +730,21 @@ func (w *Watcher) readEvents() {
 			continue
 		default:
 			w.sendError(os.NewSyscallError("GetQueuedCompletionPort", qErr))
+			// Read again, otherwise this directory is not watched anymore.
+			// If the handle is not usable anymore, startRead removes the watch
+			// and returns the error.
+			if err := w.startRead(watch); err != nil {
+				w.sendError(err)
+			}
 			continue
 		}
 
 		var offset uint32
 		for {
 			if n == 0 {
-				w.sendError(ErrEventOverflow)
+				if !lost {
+					w.sendError(ErrEventOverflow)
+				}
 				break
 			}
 
@@ -799,6 +820,9 @@ func (w *Watcher) readEvents() {
 					"Windows system assumed buffer larger than it is, events have likely been missed"))
 				break
 			}
+		}
+		if lost {
+			w.sendError(ErrEventOverflow)
 		}
 
 		if err := w.startRead(watch); err != nil {
