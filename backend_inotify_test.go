@@ -13,6 +13,27 @@ import (
 	"time"
 )
 
+// Above this number of events, TestInotifyOverflow is skipped: creating the
+// files would take too long.
+const maxOverflowEvents = 2 * 1024 * 1024
+
+// maxQueuedEvents returns the fs.inotify.max_queued_events sysctl setting, or
+// the kernel default if it cannot be read.
+func maxQueuedEvents(t *testing.T) int {
+	const kernelDefault = 16384
+	b, err := os.ReadFile("/proc/sys/fs/inotify/max_queued_events")
+	if err != nil {
+		t.Logf("can not read fs.inotify.max_queued_events, assuming %d: %v", kernelDefault, err)
+		return kernelDefault
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || n <= 0 {
+		t.Logf("bad fs.inotify.max_queued_events %q, assuming %d", b, kernelDefault)
+		return kernelDefault
+	}
+	return n
+}
+
 // Ensure that the correct error is returned on overflows.
 func TestInotifyOverflow(t *testing.T) {
 	t.Parallel()
@@ -24,6 +45,14 @@ func TestInotifyOverflow(t *testing.T) {
 	// We need to generate many more events than the
 	// fs.inotify.max_queued_events sysctl setting.
 	numDirs, numFiles := 128, 1024
+	limit := maxQueuedEvents(t)
+	if n := 2*limit/numFiles + 1; n > numDirs {
+		numDirs = n
+	}
+	if numDirs*numFiles > maxOverflowEvents {
+		t.Skipf("fs.inotify.max_queued_events is %d: too high to trigger an overflow with at most %d events",
+			limit, maxOverflowEvents)
+	}
 
 	// All events need to be in the inotify queue before pulling events off it
 	// to trigger this error.
