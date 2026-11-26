@@ -163,3 +163,73 @@ func TestRemoveState(t *testing.T) {
 	}
 	check(0)
 }
+
+// Events still queued for a watch when it is removed must not be reported with
+// a wrong path ("/name"), and the reader must not panic.
+func TestInotifyRemoveWhileWriting(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	w, err := NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bad := make(chan string, 100)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case e, ok := <-w.Events:
+				if !ok {
+					return
+				}
+				if !strings.HasPrefix(e.Name, tmp) {
+					select {
+					case bad <- e.String():
+					default:
+					}
+				}
+			case _, ok := <-w.Errors:
+				if !ok {
+					return
+				}
+			}
+		}
+	}()
+
+	for i := 0; i < 300; i++ {
+		if err := w.Add(tmp); err != nil {
+			t.Fatal(err)
+		}
+		stop := make(chan struct{})
+		written := make(chan struct{})
+		go func() {
+			defer close(written)
+			for j := 0; ; j++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				os.WriteFile(join(tmp, strconv.Itoa(j%20)), []byte("x"), 0o644)
+			}
+		}()
+		time.Sleep(time.Millisecond)
+		if err := w.Remove(tmp); err != nil {
+			t.Fatal(err)
+		}
+		close(stop)
+		<-written
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	close(bad)
+	for e := range bad {
+		t.Errorf("event outside of the watched directory: %s", e)
+	}
+}

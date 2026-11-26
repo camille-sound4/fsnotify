@@ -179,11 +179,17 @@ func (w *watches) add(ww *watch) {
 	w.path[ww.path] = ww.wd
 }
 
-func (w *watches) remove(wd uint32) {
+// removeWatch forgets the watch described by ww (a copy from byWd), unless it was
+// meanwhile removed or replaced (Remove, or the path added again).
+func (w *watches) removeWatch(ww watch) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	delete(w.path, w.wd[wd].path)
-	delete(w.wd, wd)
+	if cur, ok := w.wd[ww.wd]; ok && cur.path == ww.path {
+		delete(w.wd, ww.wd)
+	}
+	if wd, ok := w.path[ww.path]; ok && wd == ww.wd {
+		delete(w.path, ww.path)
+	}
 }
 
 func (w *watches) removePath(path string) (uint32, bool) {
@@ -207,10 +213,15 @@ func (w *watches) byPath(path string) *watch {
 	return w.wd[w.path[path]]
 }
 
-func (w *watches) byWd(wd uint32) *watch {
+// byWd returns a copy of the watch for wd: AddWith may update the watch while
+// the reader uses it.
+func (w *watches) byWd(wd uint32) (watch, bool) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
-	return w.wd[wd]
+	if ww := w.wd[wd]; ww != nil {
+		return *ww, true
+	}
+	return watch{}, false
 }
 
 func (w *watches) updatePath(path string, f func(*watch) (*watch, error)) error {
@@ -539,17 +550,24 @@ func (w *Watcher) readEvents() {
 			// doesn't append the filename to the event, but we would like to always fill the
 			// the "Name" field with a valid filename. We retrieve the path of the watch from
 			// the "paths" map.
-			watch := w.watches.byWd(uint32(raw.Wd))
+			watch, ok := w.watches.byWd(uint32(raw.Wd))
+			if !ok {
+				// Unknown watch: removed meanwhile (Remove(), or the watched
+				// path deleted), or the IN_Q_OVERFLOW record reported above.
+				// Its path is unknown: skip it rather than reporting "/name".
+				offset += unix.SizeofInotifyEvent + nameLen
+				continue
+			}
 
 			// inotify will automatically remove the watch on deletes; just need
 			// to clean our state here.
-			if watch != nil && mask&unix.IN_DELETE_SELF == unix.IN_DELETE_SELF {
-				w.watches.remove(watch.wd)
+			if mask&unix.IN_DELETE_SELF == unix.IN_DELETE_SELF {
+				w.watches.removeWatch(watch)
 			}
 			// We can't really update the state when a watched path is moved;
 			// only IN_MOVE_SELF is sent and not IN_MOVED_{FROM,TO}. So remove
 			// the watch.
-			if watch != nil && mask&unix.IN_MOVE_SELF == unix.IN_MOVE_SELF {
+			if mask&unix.IN_MOVE_SELF == unix.IN_MOVE_SELF {
 				err := w.remove(watch.path)
 				if err != nil && !errors.Is(err, ErrNonExistentWatch) {
 					if !w.sendError(err) {
@@ -558,10 +576,7 @@ func (w *Watcher) readEvents() {
 				}
 			}
 
-			var name string
-			if watch != nil {
-				name = watch.path
-			}
+			name := watch.path
 			if nameLen > 0 {
 				// Point "bytes" at the first byte of the filename
 				bytes := (*[unix.PathMax]byte)(unsafe.Pointer(&buf[offset+unix.SizeofInotifyEvent]))[:nameLen:nameLen]
