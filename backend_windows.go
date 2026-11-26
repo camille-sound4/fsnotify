@@ -147,6 +147,12 @@ type Watcher struct {
 	watches    watchMap    // Map of watches (key: i-number)
 	closed     bool        // Set to true when Close() is first called
 	withoutdir atomic.Bool // do not send events for directory (set by AddWith, read by the reader)
+
+	// Watches removed while a read was still in flight: their handle is
+	// closed, but the kernel still holds their OVERLAPPED and buffer until the
+	// last completion is dequeued. Keeping them here keeps them alive and lets
+	// the reader ignore these completions. Only used by the I/O thread.
+	closing map[*watch]struct{}
 }
 
 // NewWatcher creates a new Watcher.
@@ -174,6 +180,7 @@ func NewBufferedWatcher(sz uint) (*Watcher, error) {
 		Events:  make(chan Event, sz),
 		Errors:  make(chan error),
 		quit:    make(chan chan<- error, 1),
+		closing: make(map[*watch]struct{}),
 	}
 	go w.readEvents()
 	return w, nil
@@ -421,6 +428,7 @@ type watch struct {
 	names   map[string]uint64 // Map of names being watched and their notify flags
 	rename  string            // Remembers the old name while renaming a file
 	buf     []byte            // buffer, allocated later
+	reads   int               // reads issued and not dequeued yet (I/O thread only)
 }
 
 type (
@@ -623,6 +631,11 @@ func (w *Watcher) startRead(watch *watch) error {
 		w.mu.Lock()
 		delete(w.watches[watch.ino.volume], watch.ino.index)
 		w.mu.Unlock()
+		if watch.reads > 0 {
+			// A completion is still to come for this watch: it must not be
+			// processed (the handle is closed, its number may be reused).
+			w.closing[watch] = struct{}{}
+		}
 		return nil
 	}
 
@@ -642,6 +655,7 @@ func (w *Watcher) startRead(watch *watch) error {
 		w.startRead(watch)
 		return err
 	}
+	watch.reads++
 	return nil
 }
 
@@ -693,6 +707,16 @@ func (w *Watcher) readEvents() {
 					in.reply <- w.remWatch(in.path)
 				}
 			default:
+			}
+			continue
+		}
+
+		watch.reads--
+		if _, removed := w.closing[watch]; removed {
+			// Completion of a read issued before the watch was removed:
+			// its handle is closed, nothing to report nor to restart.
+			if watch.reads <= 0 {
+				delete(w.closing, watch)
 			}
 			continue
 		}

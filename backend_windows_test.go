@@ -5,8 +5,10 @@ package fsnotify
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRemoveState(t *testing.T) {
@@ -64,5 +66,74 @@ func TestWindowsRemWatch(t *testing.T) {
 	}
 	if err := w.remWatch(tmp); err == nil {
 		t.Fatal("Should be fail with closed handle\n")
+	}
+}
+
+// Remove() while events are coming in: the completion of the read in flight
+// arrives after the handle is closed, and must not be processed (it closed the
+// handle a second time, which could close an unrelated handle of the process).
+func TestRemoveWhileWriting(t *testing.T) {
+	tmp := t.TempDir()
+	w, err := NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	errs := make(chan error, 100)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case _, ok := <-w.Events:
+				if !ok {
+					return
+				}
+			case err, ok := <-w.Errors:
+				if !ok {
+					return
+				}
+				select {
+				case errs <- err:
+				default:
+				}
+			}
+		}
+	}()
+
+	for i := 0; i < 300; i++ {
+		if err := w.Add(tmp); err != nil {
+			t.Fatal(err)
+		}
+		stop := make(chan struct{})
+		written := make(chan struct{})
+		go func() {
+			defer close(written)
+			for j := 0; ; j++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				os.WriteFile(join(tmp, fmt.Sprintf("f%d", j%20)), []byte("x"), 0o644)
+			}
+		}()
+		time.Sleep(time.Millisecond)
+		if err := w.Remove(tmp); err != nil {
+			t.Fatal(err)
+		}
+		close(stop)
+		<-written
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	close(errs)
+	for err := range errs {
+		if s := err.Error(); strings.Contains(s, "CloseHandle") || strings.Contains(s, "CancelIo") {
+			t.Errorf("handle used after being closed: %v", err)
+		}
 	}
 }
