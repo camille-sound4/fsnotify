@@ -287,10 +287,9 @@ func NewBufferedWatcher(sz uint) (*Watcher, error) {
 
 // Returns true if the event was sent, or false if watcher is closed.
 func (w *Watcher) sendEvent(e Event) bool {
-	if w.withoutdir.Load() {
-		if fi, err := os.Stat(e.Name); err == nil && fi.IsDir() {
-			return true
-		}
+	if e.Op == 0 {
+		// The inotify mask maps to no Op (e.g. IN_UNMOUNT): nothing to report
+		return true
 	}
 	select {
 	case w.Events <- e:
@@ -398,10 +397,14 @@ func (w *Watcher) AddWith(name string, opts ...addOpt) error {
 	w.preferclosewrite.Store(with.preferclosewrite)
 
 	var flags uint32 = unix.IN_MOVED_TO | unix.IN_MOVED_FROM |
-		unix.IN_CREATE | unix.IN_ATTRIB | unix.IN_MODIFY |
+		unix.IN_CREATE | unix.IN_ATTRIB |
 		unix.IN_MOVE_SELF | unix.IN_DELETE | unix.IN_DELETE_SELF
 	if w.preferclosewrite.Load() {
-		flags = flags | unix.IN_CLOSE_WRITE
+		// Write is reported on close only: IN_MODIFY would only produce
+		// events with nothing to report, one per write().
+		flags |= unix.IN_CLOSE_WRITE
+	} else {
+		flags |= unix.IN_MODIFY
 	}
 	return w.watches.updatePath(name, func(existing *watch) (*watch, error) {
 		if existing != nil {
@@ -582,6 +585,14 @@ func (w *Watcher) readEvents() {
 				bytes := (*[unix.PathMax]byte)(unsafe.Pointer(&buf[offset+unix.SizeofInotifyEvent]))[:nameLen:nameLen]
 				// The filename is padded with NULL bytes. TrimRight() gets rid of those.
 				name += "/" + strings.TrimRight(string(bytes[0:nameLen]), "\000")
+			}
+
+			// WithoutDirectories: drop the events about a directory entry. The
+			// kernel tells it with IN_ISDIR, even when the entry is already gone.
+			// Events about the watched directory itself (nameLen 0) are kept.
+			if nameLen > 0 && mask&unix.IN_ISDIR != 0 && w.withoutdir.Load() {
+				offset += unix.SizeofInotifyEvent + nameLen
+				continue
 			}
 
 			event := w.newEvent(name, mask)

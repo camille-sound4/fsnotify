@@ -233,3 +233,59 @@ func TestInotifyRemoveWhileWriting(t *testing.T) {
 		t.Errorf("event outside of the watched directory: %s", e)
 	}
 }
+
+// With PreferCloseWrite and WithoutDirectories: a file written several times
+// gives Create then a single Write on close, nothing else; a directory created
+// then removed gives nothing, even when gone before the events are read.
+func TestInotifyCloseWriteWithoutDirectories(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	w, err := NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if err := w.AddWith(tmp, PreferCloseWrite(), WithoutDirectories()); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := join(tmp, "dir")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	file := join(tmp, "file")
+	fp, err := os.Create(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		fp.Write([]byte("data"))
+		fp.Sync()
+	}
+	fp.Close()
+
+	var got []string
+	timeout := time.After(500 * time.Millisecond)
+loop:
+	for {
+		select {
+		case e := <-w.Events:
+			got = append(got, e.String())
+		case err := <-w.Errors:
+			t.Fatal(err)
+		case <-timeout:
+			break loop
+		}
+	}
+	want := []string{
+		Event{Name: file, Op: Create}.String(),
+		Event{Name: file, Op: Write}.String(),
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("events:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
