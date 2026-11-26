@@ -137,3 +137,48 @@ func TestRemoveWhileWriting(t *testing.T) {
 		}
 	}
 }
+
+// Renaming "in" must not rewrite the path of a watch on a sibling "in2" that
+// only shares its prefix.
+func TestRenameSiblingPrefix(t *testing.T) {
+	tmp := t.TempDir()
+	sibling := join(tmp, "in2")
+	mkdir(t, sibling)
+	touch(t, join(tmp, "in"))
+
+	w, err := NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if err := w.Add(tmp); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Add(sibling); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Rename(join(tmp, "in"), join(tmp, "x")); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	want := join(sibling, "f")
+	touch(t, want)
+
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case e := <-w.Events:
+			if strings.HasSuffix(e.Name, `\f`) {
+				if e.Name != want {
+					t.Fatalf("event for %q, want %q", e.Name, want)
+				}
+				return
+			}
+		case err := <-w.Errors:
+			t.Fatal(err)
+		case <-timeout:
+			t.Fatalf("no event for %q", want)
+		}
+	}
+}

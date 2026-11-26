@@ -798,17 +798,22 @@ func (w *Watcher) readEvents() {
 			case windows.FILE_ACTION_RENAMED_OLD_NAME:
 				watch.rename = name
 			case windows.FILE_ACTION_RENAMED_NEW_NAME:
-				// Update saved path of all sub-watches.
-				old := filepath.Join(watch.path, watch.rename)
-				w.mu.Lock()
-				for _, watchMap := range w.watches {
-					for _, ww := range watchMap {
-						if strings.HasPrefix(ww.path, old) {
-							ww.path = filepath.Join(fullname, strings.TrimPrefix(ww.path, old))
+				// Update saved path of all sub-watches. Without the old name
+				// (OLD_NAME record lost), old would be the watched directory
+				// itself: leave the paths alone.
+				if watch.rename != "" {
+					old := filepath.Join(watch.path, watch.rename)
+					w.mu.Lock()
+					for _, watchMap := range w.watches {
+						for _, ww := range watchMap {
+							// old itself or below it, not a sibling sharing its prefix
+							if ww.path == old || strings.HasPrefix(ww.path, old+string(filepath.Separator)) {
+								ww.path = filepath.Join(fullname, strings.TrimPrefix(ww.path, old))
+							}
 						}
 					}
+					w.mu.Unlock()
 				}
-				w.mu.Unlock()
 
 				if watch.names[watch.rename] != 0 {
 					watch.names[name] |= watch.names[watch.rename]
@@ -832,6 +837,9 @@ func (w *Watcher) readEvents() {
 			if raw.Action == windows.FILE_ACTION_RENAMED_NEW_NAME {
 				fullname = filepath.Join(watch.path, watch.rename)
 				sendNameEvent()
+				// The rename is complete: don't reuse the old name for a later
+				// NEW_NAME record whose OLD_NAME was lost.
+				watch.rename = ""
 			}
 
 			// Move to the next event in the buffer
