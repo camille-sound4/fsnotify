@@ -209,7 +209,10 @@ func (w *Watcher) sendError(err error) bool {
 	select {
 	case w.Errors <- err:
 		return true
-	case <-w.quit:
+	case ch := <-w.quit:
+		// Put the quit request back for the reader loop, as sendEvent does:
+		// dropping it would make Close() wait forever.
+		w.quit <- ch
 	}
 	return false
 }
