@@ -138,14 +138,23 @@ func WithBufferSize(bytes int) addOpt {
 	return func(opt *withOpts) { opt.bufsize = bytes }
 }
 
-// WithoutDirectories filters out directory events.
+// WithoutDirectories does not report events about directories.
+//
+//   - inotify: events about a directory entry of a watched directory are
+//     dropped, as flagged by the kernel (exact, even for a directory already
+//     removed). Events about the watched directory itself are reported.
+//   - other backends: an event is dropped when its path is a directory at the
+//     time it is sent; a directory already removed gets through.
 func WithoutDirectories() addOpt {
 	return func(opt *withOpts) { opt.withoutdir = true }
 }
 
-// PreferCloseWrite will trigger Write event on close write for systems which supports it.
+// PreferCloseWrite reports Write once, when a file opened for writing is
+// closed, instead of on each write: the file is complete when Write is
+// received. A file moved into a watched directory is reported as Write
+// instead of Create.
 //
-// Currently supported with inotify (Linux) only
+// Supported with inotify (Linux) only; ignored by other backends.
 func PreferCloseWrite() addOpt {
 	return func(opt *withOpts) { opt.preferclosewrite = true }
 }

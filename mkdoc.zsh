@@ -139,6 +139,12 @@ addwith=$(<<EOF
 //
 //   - [WithBufferSize] sets the buffer size for the Windows backend; no-op on
 //     other platforms. The default is 64K (65536 bytes).
+//   - [WithoutDirectories] does not report events about directories.
+//   - [PreferCloseWrite] reports Write when a file opened for writing is
+//     closed, instead of on each write; inotify only.
+//
+// The options apply to the whole Watcher, not only to this path: the last
+// call to AddWith sets them.
 EOF
 )
 

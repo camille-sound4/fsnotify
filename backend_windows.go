@@ -288,6 +288,12 @@ func (w *Watcher) Add(name string) error { return w.AddWith(name) }
 //
 //   - [WithBufferSize] sets the buffer size for the Windows backend; no-op on
 //     other platforms. The default is 64K (65536 bytes).
+//   - [WithoutDirectories] does not report events about directories.
+//   - [PreferCloseWrite] reports Write when a file opened for writing is
+//     closed, instead of on each write; inotify only.
+//
+// The options apply to the whole Watcher, not only to this path: the last
+// call to AddWith sets them.
 func (w *Watcher) AddWith(name string, opts ...addOpt) error {
 	if w.isClosed() {
 		return ErrClosed
@@ -739,8 +745,10 @@ func (w *Watcher) readEvents() {
 				lost = true
 			}
 		case windows.ERROR_NOTIFY_ENUM_DIR:
-			// Too many changes to report them: this is how a buffer overflow is
-			// reported for a network share. Keep watching.
+			// Too many changes to report them. STATUS_NOTIFY_ENUM_DIR is a
+			// success status, normally seen as a completion of 0 bytes (handled
+			// below); this case is a safety net should it come as an error.
+			// Keep watching.
 			w.sendError(ErrEventOverflow)
 			if err := w.startRead(watch); err != nil {
 				w.sendError(err)
